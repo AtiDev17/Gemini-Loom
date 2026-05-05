@@ -49,7 +49,9 @@ def cmd_run(args):
     current_timeout = args.timeout
 
     for attempt in range(1, max_attempts + 1):
-        runner = watchdog.GeminiRunner(prompt, timeout_seconds=current_timeout)
+        runner = watchdog.GeminiRunner(
+            prompt, timeout_seconds=current_timeout, model=args.model
+        )
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         exit_code, hang, rate_limited = loop.run_until_complete(runner.run())
@@ -99,6 +101,7 @@ def main():
     run_parser.add_argument(
         "--timeout", type=int, default=120, help="Thinking timeout in seconds"
     )
+    run_parser.add_argument("-m", "--model", help="The model to use (e.g., flash-lite)")
 
     args = parser.parse_args()
 
