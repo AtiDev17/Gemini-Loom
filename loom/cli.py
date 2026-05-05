@@ -46,13 +46,15 @@ def cmd_run(args):
         profiler.switch_account(active)
 
     max_attempts = 3
+    current_timeout = args.timeout
+
     for attempt in range(1, max_attempts + 1):
-        runner = watchdog.GeminiRunner(prompt, timeout_seconds=args.timeout)
+        runner = watchdog.GeminiRunner(prompt, timeout_seconds=current_timeout)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         exit_code, hang, rate_limited = loop.run_until_complete(runner.run())
 
-        # Update diffs after every attempt (so retries have fresh context)
+        # Update diffs after every attempt
         diff = state.update_diff()
         if diff:
             print("📄 Diff updated for next run.")
@@ -66,11 +68,13 @@ def cmd_run(args):
                 break
 
         if hang:
-            print("⚠️ Hang occurred. Retrying with pruned context...")
-            # TODO: prune manifest last_diff before retry
+            print(f"⚠️ Hang occurred (timeout {current_timeout}s). Retrying with pruned context...")
+            state.prune_diff()
+            # double the timeout for the next attempt, capped at 10 minutes
+            current_timeout = min(current_timeout * 2, 600)
             continue
 
-        # Success – exit retry loop
+        # Success
         break
     else:
         print("❌ All attempts exhausted.")

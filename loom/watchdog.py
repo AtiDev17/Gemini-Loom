@@ -7,7 +7,6 @@ import json
 import time
 from pathlib import Path
 
-# Known location of the Gemini CLI (PowerShell wrapper on Windows)
 _GEMINI_PS1_PATH = Path.home() / "AppData" / "Roaming" / "npm" / "gemini.ps1"
 
 
@@ -20,9 +19,10 @@ class GeminiRunner:
         self.hang_detected = False
         self.rate_limited = False
         self._stderr_lines = []
+        self._received_result = False
+        self._killed_by_watchdog = False
 
     async def _read_stdout(self, stream):
-        """Parse stream-json lines, update timestamp."""
         while True:
             line = await stream.readline()
             if not line:
@@ -39,11 +39,12 @@ class GeminiRunner:
             if event_type == "message" and event.get("delta"):
                 print(event["content"], end="", flush=True)
             elif event_type == "result":
+                if event.get("status") == "success":
+                    self._received_result = True
                 print(f"\n✅ {event.get('status', 'done')} - {event.get('stats', {})}")
         return
 
     async def _read_stderr(self, stream):
-        """Accumulate stderr lines, scan for 429."""
         while True:
             line = await stream.readline()
             if not line:
@@ -56,15 +57,15 @@ class GeminiRunner:
                 self.rate_limited = True
 
     async def _watchdog_loop(self):
-        """Terminate only if the process is still alive after timeout."""
         while True:
             await asyncio.sleep(1)
             if time.time() - self.last_event_time > self.timeout:
-                # Don't kill if the process already exited
+                # Only kill if still running and no result seen
                 if self.process is None or self.process.returncode is not None:
                     return
-                self.hang_detected = True
-                print("\n💢 Hang detected. Terminating...")
+                if self._received_result:
+                    return
+                self._killed_by_watchdog = True
                 self.process.send_signal(signal.SIGTERM)
                 try:
                     await asyncio.wait_for(self.process.wait(), timeout=5)
@@ -73,12 +74,10 @@ class GeminiRunner:
                 break
 
     async def run(self):
-        """Execute gemini with stream-json."""
         if platform.system() == "Windows" and _GEMINI_PS1_PATH.exists():
             gemini_path = str(_GEMINI_PS1_PATH)
         else:
             import shutil
-
             gemini_path = shutil.which("gemini")
             if gemini_path is None:
                 raise FileNotFoundError("gemini CLI not found")
@@ -87,14 +86,10 @@ class GeminiRunner:
             cmd = [
                 "powershell.exe",
                 "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                gemini_path,
-                "-p",
-                self.prompt,
-                "-o",
-                "stream-json",
+                "-ExecutionPolicy", "Bypass",
+                "-File", gemini_path,
+                "-p", self.prompt,
+                "-o", "stream-json",
             ]
         else:
             cmd = ["gemini", "-p", self.prompt, "-o", "stream-json"]
@@ -121,10 +116,12 @@ class GeminiRunner:
 
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
-        exit_code = self.process.returncode
-        if self.hang_detected and exit_code == 0:
-            # False alarm: process finished just as the watchdog fired
-            self.hang_detected = False
+        # Determine true hang status
+        self.hang_detected = self._killed_by_watchdog and not self._received_result
+        if self.hang_detected:
+            print("\n💢 Hang detected. Terminating...")   # print only on real hang
+
+        exit_code = self.process.returncode if self.process.returncode is not None else -1
         if self.hang_detected:
             exit_code = -1
         return exit_code, self.hang_detected, self.rate_limited

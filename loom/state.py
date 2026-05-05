@@ -258,3 +258,54 @@ def update_diff():
     save_manifest(manifest)
 
     return diff_text
+
+def prune_diff(max_files: int = 3):
+    """
+    Trim the stored diff to only the first `max_files` distinct file patches.
+    This keeps the retry context small and focused.
+    """
+    manifest = load_manifest()
+    diff_text = manifest.get("last_diff", "")
+    if not diff_text:
+        return
+
+    # Split the unified diff into per-file hunks.
+    # Each file patch starts with a line like '--- a/path' or '--- /dev/null'
+    chunks = []
+    current_chunk = []
+    for line in diff_text.splitlines():
+        if line.startswith("--- ") and current_chunk:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = [line]
+        else:
+            current_chunk.append(line)
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+
+    # Keep only the first max_files distinct files
+    seen_files = set()
+    kept_chunks = []
+    for chunk in chunks:
+        # extract filename from the '---' or '+++' line
+        for prefix in ("--- a/", "--- /dev/null", "+++ b/", "+++ /dev/null"):
+            for line in chunk.split("\n"):
+                if line.startswith(prefix):
+                    fname = line[len(prefix):].strip()
+                    if fname and fname not in seen_files:
+                        seen_files.add(fname)
+                        kept_chunks.append(chunk)
+                        break
+            if len(kept_chunks) >= max_files:
+                break
+        if len(kept_chunks) >= max_files:
+            break
+
+    if kept_chunks:
+        pruned = "\n\n".join(kept_chunks)
+        # Add a note that the diff was pruned
+        pruned += "\n\n(Note: diff pruned to limit context after a hang.)"
+        manifest["last_diff"] = pruned
+    else:
+        manifest["last_diff"] = ""   # no relevant chunks, clear diff entirely
+
+    save_manifest(manifest)
