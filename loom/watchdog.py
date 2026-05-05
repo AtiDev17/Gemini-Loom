@@ -11,9 +11,10 @@ _GEMINI_PS1_PATH = Path.home() / "AppData" / "Roaming" / "npm" / "gemini.ps1"
 
 
 class GeminiRunner:
-    def __init__(self, prompt: str, timeout_seconds=120):
+    def __init__(self, prompt: str, timeout_seconds=120, model: str = None):
         self.prompt = prompt
         self.timeout = timeout_seconds
+        self.model = model
         self.last_event_time = time.time()
         self.process = None
         self.hang_detected = False
@@ -93,6 +94,9 @@ class GeminiRunner:
             ]
         else:
             cmd = ["gemini", "-p", self.prompt, "-o", "stream-json"]
+
+        if self.model:
+            cmd.extend(["-m", self.model])
 
         self.process = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
