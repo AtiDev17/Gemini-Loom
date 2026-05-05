@@ -56,23 +56,24 @@ class GeminiRunner:
                 self.rate_limited = True
 
     async def _watchdog_loop(self):
-        """Terminate if no output for self.timeout seconds."""
+        """Terminate only if the process is still alive after timeout."""
         while True:
             await asyncio.sleep(1)
             if time.time() - self.last_event_time > self.timeout:
+                # Don't kill if the process already exited
+                if self.process is None or self.process.returncode is not None:
+                    return
                 self.hang_detected = True
                 print("\n💢 Hang detected. Terminating...")
-                if self.process and self.process.returncode is None:
-                    self.process.send_signal(signal.SIGTERM)
-                    try:
-                        await asyncio.wait_for(self.process.wait(), timeout=5)
-                    except asyncio.TimeoutError:
-                        self.process.kill()
+                self.process.send_signal(signal.SIGTERM)
+                try:
+                    await asyncio.wait_for(self.process.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    self.process.kill()
                 break
 
     async def run(self):
         """Execute gemini with stream-json."""
-        # On Windows, directly use the known PowerShell script path.
         if platform.system() == "Windows" and _GEMINI_PS1_PATH.exists():
             gemini_path = str(_GEMINI_PS1_PATH)
         else:
@@ -80,12 +81,8 @@ class GeminiRunner:
 
             gemini_path = shutil.which("gemini")
             if gemini_path is None:
-                raise FileNotFoundError(
-                    "gemini CLI not found. Please ensure it's installed and available in PATH,\n"
-                    "or set GEMINI_CLI_PATH to the full path of gemini.ps1"
-                )
+                raise FileNotFoundError("gemini CLI not found")
 
-        # If the resolved path is a .ps1, invoke with PowerShell
         if gemini_path.endswith(".ps1"):
             cmd = [
                 "powershell.exe",
@@ -112,10 +109,11 @@ class GeminiRunner:
         stdout_task = asyncio.create_task(self._read_stdout(self.process.stdout))
         stderr_task = asyncio.create_task(self._read_stderr(self.process.stderr))
         watchdog_task = asyncio.create_task(self._watchdog_loop())
-
         process_wait = asyncio.create_task(self.process.wait())
+
         done, pending = await asyncio.wait(
-            [process_wait, watchdog_task], return_when=asyncio.FIRST_COMPLETED
+            [process_wait, watchdog_task],
+            return_when=asyncio.FIRST_COMPLETED,
         )
 
         for task in pending:
@@ -124,6 +122,9 @@ class GeminiRunner:
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
         exit_code = self.process.returncode
+        if self.hang_detected and exit_code == 0:
+            # False alarm: process finished just as the watchdog fired
+            self.hang_detected = False
         if self.hang_detected:
             exit_code = -1
         return exit_code, self.hang_detected, self.rate_limited

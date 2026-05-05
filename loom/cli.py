@@ -8,10 +8,8 @@ from . import state, hook_writer, profiler, watchdog
 def cmd_init(_args):
     """Initialize Loom in the current directory."""
     state.ensure_loom_dir()
-    # Write empty manifest
     manifest = state.DEFAULT_MANIFEST.copy()
     state.save_manifest(manifest)
-    # Install hook
     hook_writer.install_hooks()
     print("✅ Gemini-Loom initialized. .loom/ created and hook installed.")
 
@@ -19,6 +17,8 @@ def cmd_init(_args):
 def cmd_account(args):
     if args.action == "add":
         profiler.add_account(args.label)
+    elif args.action == "save-as":
+        profiler.save_as(args.label)
     elif args.action == "list":
         accounts = profiler.list_accounts()
         active = profiler.get_active_account_label()
@@ -30,6 +30,8 @@ def cmd_account(args):
             print("No accounts configured.")
     elif args.action == "switch":
         profiler.switch_account(args.label)
+    elif args.action == "remove":
+        profiler.remove_account(args.label)
     else:
         print("Unknown account command.")
 
@@ -43,26 +45,35 @@ def cmd_run(args):
     if active:
         profiler.switch_account(active)
 
-    runner = watchdog.GeminiRunner(prompt, timeout_seconds=args.timeout)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        runner = watchdog.GeminiRunner(prompt, timeout_seconds=args.timeout)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        exit_code, hang, rate_limited = loop.run_until_complete(runner.run())
 
-    exit_code, hang, rate_limited = loop.run_until_complete(runner.run())
+        # Update diffs after every attempt (so retries have fresh context)
+        diff = state.update_diff()
+        if diff:
+            print("📄 Diff updated for next run.")
 
-    if rate_limited:
-        print("🔄 Rate limited. Rotating account and retrying...")
-        if profiler.rotate_to_next_account():
-            print("🔄 Retrying with new account...")
-            runner2 = watchdog.GeminiRunner(prompt, timeout_seconds=args.timeout)
-            loop.run_until_complete(runner2.run())
-        else:
-            print("❌ No alternate accounts available.")
+        if rate_limited:
+            print("🔄 Rate limited. Rotating account and retrying...")
+            if profiler.rotate_to_next_account():
+                continue
+            else:
+                print("❌ No alternate accounts available.")
+                break
 
-    if hang:
-        print("⚠️ Hang occurred. Retrying with pruned context...")
-        # TODO: prune manifest last_diff and retry
-        runner3 = watchdog.GeminiRunner(prompt, timeout_seconds=args.timeout)
-        loop.run_until_complete(runner3.run())
+        if hang:
+            print("⚠️ Hang occurred. Retrying with pruned context...")
+            # TODO: prune manifest last_diff before retry
+            continue
+
+        # Success – exit retry loop
+        break
+    else:
+        print("❌ All attempts exhausted.")
 
 
 def main():
@@ -71,15 +82,14 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # init
     subparsers.add_parser("init", help="Initialize Gemini-Loom in this project")
 
-    # account
     acc_parser = subparsers.add_parser("account", help="Manage OAuth accounts")
-    acc_parser.add_argument("action", choices=["add", "list", "switch"])
-    acc_parser.add_argument("label", nargs="?", help="Account label for add/switch")
+    acc_parser.add_argument(
+        "action", choices=["add", "save-as", "list", "switch", "remove"]
+    )
+    acc_parser.add_argument("label", nargs="?", help="Account label")
 
-    # run
     run_parser = subparsers.add_parser("run", help="Run a prompt through Gemini")
     run_parser.add_argument("prompt", help="The prompt to send")
     run_parser.add_argument(

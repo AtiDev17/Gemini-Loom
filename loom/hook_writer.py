@@ -1,6 +1,7 @@
 """Write the context-injecting hook into the project's Gemini settings."""
 
 import json
+import sys
 from pathlib import Path
 
 HOOK_SCRIPT_CONTENT = r'''# -*- coding: utf-8 -*-
@@ -53,6 +54,17 @@ def install_hooks():
     hook_script.write_text(HOOK_SCRIPT_CONTENT)
     hook_script.chmod(0o755)
 
+    # Build command using the current Python interpreter
+    python_exe = sys.executable
+    # Convert script path to forward slashes – safe for Windows shells
+    script_path_str = str(hook_script.absolute()).replace("\\", "/")
+    # Quote python executable only if it contains spaces
+    if " " in python_exe:
+        python_part = f'"{python_exe}"'
+    else:
+        python_part = python_exe
+    command = f'{python_part} "{script_path_str}"'
+
     # Load or create settings
     if settings_path.exists():
         with open(settings_path) as f:
@@ -66,24 +78,28 @@ def install_hooks():
         settings["hooks"]["SessionStart"] = []
 
     # Check if our hook already present
+    found = False
     for group in settings["hooks"]["SessionStart"]:
         for hook in group.get("hooks", []):
             if hook.get("name") == "loom-context-injector":
-                return  # Already installed
+                # Update command to current interpreter
+                hook["command"] = command
+                found = True
+                break
 
-    # Add hook definition
-    new_hook = {
-        "matcher": "",
-        "hooks": [
-            {
-                "name": "loom-context-injector",
-                "type": "command",
-                "command": f"python {hook_script.absolute()}",
-                "timeout": 5000,
-            }
-        ],
-    }
-    settings["hooks"]["SessionStart"].append(new_hook)
+    if not found:
+        new_hook = {
+            "matcher": "",
+            "hooks": [
+                {
+                    "name": "loom-context-injector",
+                    "type": "command",
+                    "command": command,
+                    "timeout": 5000,
+                }
+            ],
+        }
+        settings["hooks"]["SessionStart"].append(new_hook)
 
     # Ensure directory exists
     settings_path.parent.mkdir(parents=True, exist_ok=True)
